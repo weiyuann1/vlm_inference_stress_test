@@ -9,13 +9,29 @@ import time
 import threading
 import argparse
 import sys
+from threading import Timer
 
 
 # Default values
-VIDEO_BASE_PATH = "./testset"
-_max_requests = 1024
+VIDEO_BASE_PATH = "./processed_videos"
+_max_requests = 584
 prompt_text = "Please describe the content of the video."
-max_tokens = 50
+max_tokens = 200
+
+def status_monitor():
+    """Monitor and report status every 30 seconds"""
+    with VLLMUser._users_lock:
+        active_users = len(VLLMUser._active_users)
+    
+    with VLLMUser._request_lock:
+        completed_requests = VLLMUser._request_count
+        stop_sending = VLLMUser._stop_sending
+    
+    print(f"[STATUS] Active users: {active_users}, Completed requests: {completed_requests}/{VLLMUser._max_requests}, Stop sending: {stop_sending}")
+    
+    # Schedule next status report
+    if active_users > 0 or not stop_sending:
+        Timer(30.0, status_monitor).start()
 
 class VLLMUser(HttpUser):
     wait_time = between(0, 0)
@@ -34,6 +50,10 @@ class VLLMUser(HttpUser):
     # Global video index to ensure each request uses a different video
     _global_video_index = 0
     _video_index_lock = threading.Lock()
+    
+    # Active users tracking
+    _active_users = set()
+    _users_lock = threading.Lock()
 
     @classmethod
     def _preload_videos(cls):
@@ -47,12 +67,18 @@ class VLLMUser(HttpUser):
             total_files = 0
             total_bytes = 0
             
-            # Load video directories
+            # Load video directories (nested structure: category/video_name/)
+            video_dirs = []
             if os.path.exists(VIDEO_BASE_PATH):
-                video_dirs = [d for d in os.listdir(VIDEO_BASE_PATH) 
-                             if os.path.isdir(os.path.join(VIDEO_BASE_PATH, d))]
-            else:
-                video_dirs = []
+                for category in os.listdir(VIDEO_BASE_PATH):
+                    category_path = os.path.join(VIDEO_BASE_PATH, category)
+                    if os.path.isdir(category_path):
+                        for video_name in os.listdir(category_path):
+                            video_path = os.path.join(category_path, video_name)
+                            if os.path.isdir(video_path):
+                                video_dirs.append(os.path.join(category, video_name))
+            
+            print(f"[DEBUG] Found {len(video_dirs)} video directories")
             
             if not video_dirs:
                 print(f"Error: No video directories found in {VIDEO_BASE_PATH}")
@@ -104,10 +130,10 @@ class VLLMUser(HttpUser):
         if not frame_files:
             return [{"type": "text", "text": prompt_text}], 0, 0
         
-        # Load up to 8 frames
+        # Load all available frames (no limit)
         content = [{"type": "text", "text": prompt_text}]
         
-        for frame_file in frame_files[:8]:
+        for frame_file in frame_files:
             try:
                 with open(frame_file, "rb") as f:
                     image_bytes = f.read()
@@ -126,8 +152,12 @@ class VLLMUser(HttpUser):
         return content, file_count, total_bytes
 
     def on_start(self):
-        user_id = getattr(self, 'user_id', 'unknown')
-        print(f"[INFO] User {user_id} starting...")
+        user_id = id(self)
+        self.user_id = user_id
+        
+        with VLLMUser._users_lock:
+            VLLMUser._active_users.add(user_id)
+            print(f"[INFO] User {user_id} starting... Active users: {len(VLLMUser._active_users)}")
         
         # Ensure videos are preloaded (only happens once)
         self._preload_videos()
@@ -136,6 +166,21 @@ class VLLMUser(HttpUser):
         self.current_index = 0
         
         print(f"[INFO] User {user_id} ready with {len(self._preloaded_payloads)} preloaded payloads")
+        
+        # Start status monitoring (only once)
+        if len(VLLMUser._active_users) == 1:
+            Timer(30.0, status_monitor).start()
+    
+    def on_stop(self):
+        user_id = getattr(self, 'user_id', 'unknown')
+        
+        with VLLMUser._users_lock:
+            VLLMUser._active_users.discard(user_id)
+            remaining_users = len(VLLMUser._active_users)
+            print(f"[INFO] User {user_id} stopped. Remaining active users: {remaining_users}")
+            
+            if remaining_users == 0:
+                print(f"[INFO] *** ALL USERS STOPPED *** Total requests: {VLLMUser._request_count}")
 
 
 
@@ -187,14 +232,17 @@ class VLLMUser(HttpUser):
         headers = {"Content-Type": "application/json"}
 
         # Send the request
+        request_start_time = time.time()
         try:
             response = self.client.post(
                 "/v1/chat/completions",
                 data=json.dumps(payload),
                 headers=headers,
-                name="vllm_video_completion"
+                name="vllm_video_completion",
+                timeout=300  # 5 minutes timeout
             )
-            print(f"[INFO] Request #{current_count} completed with status: {response.status_code}")
+            request_duration = time.time() - request_start_time
+            print(f"[INFO] Request #{current_count} completed in {request_duration:.2f}s with status: {response.status_code}")
             
             # # Debug: Print model inference results
             # if response.status_code == 200:
@@ -221,7 +269,11 @@ class VLLMUser(HttpUser):
         # Stop this user after completing the request
         if is_final_request:
             print(f"[INFO] Final request completed. Total requests sent: {current_count}")
+            print(f"[INFO] All requests sent, stopping user {getattr(self, 'user_id', 'unknown')}")
         
         # Always stop the user if we've reached the limit
         if VLLMUser._stop_sending:
+            with VLLMUser._users_lock:
+                active_count = len(VLLMUser._active_users)
+            print(f"[INFO] User {getattr(self, 'user_id', 'unknown')} stopping. Active users: {active_count}")
             raise StopUser()

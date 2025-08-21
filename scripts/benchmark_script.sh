@@ -4,7 +4,7 @@
 echo "开始梯度压测，寻找性能上限..."
 
 # 测试不同并发数
-concurrency_levels=(50 100 200 400 800 1600 3200)
+concurrency_levels=(10 30 50 100 200 300 400)
 
 for concurrency in "${concurrency_levels[@]}"; do
     echo "========================================="
@@ -12,10 +12,10 @@ for concurrency in "${concurrency_levels[@]}"; do
     echo "========================================="
     
     # 运行压测
-    python -m locust -f locustfile.py \
+    python -m locust -f concurrent_test_image.py \
         -u $concurrency \
-        -r 50 \
-        -t 2m \
+        -r 10 \
+        -t 20m \
         --host http://localhost:8080 \
         --headless \
         --csv=results_${concurrency}

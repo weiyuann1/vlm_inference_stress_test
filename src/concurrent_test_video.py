@@ -21,7 +21,11 @@ import sys
 VIDEO_BASE_PATH = "videos_directory"
 _max_requests = 584
 prompt_text = "Please describe the content of the video."
-max_tokens = 50
+max_tokens = 200
+max_frames = 16
+min_pixels = 28 * 28
+max_pixels = 512 * 512
+fps = 1.0
 
 def prepare_message_for_vllm(content_messages):
     """Convert video frames to individual image_url messages for vLLM compatibility"""
@@ -43,7 +47,6 @@ def prepare_message_for_vllm(content_messages):
                     assert video_inputs is not None, "video_inputs should not be None"
                     video_input = (video_inputs.pop()).permute(0, 2, 3, 1).numpy().astype(np.uint8)
                     # Limit frames to match server configuration (image=8)
-                    max_frames = 8
                     selected_frames = video_input[:max_frames] if len(video_input) > max_frames else video_input
                     print(f"[DEBUG] Limited to {len(selected_frames)} frames (from {len(video_input)} total frames)")
                     
@@ -178,10 +181,10 @@ class VLLMUser(HttpUser):
                         {
                             "type": "video",
                             "video": video_file,
-                            "total_pixels": 20480 * 28 * 28,
-                            "min_pixels": 16 * 28 * 2,
-                            "fps": 1.0,
-                            "video_maxlen": 16
+                            "min_pixels": min_pixels,
+                            "max_pixels": max_pixels,
+                            "fps": fps,
+                            "video_maxlen": max_frames
                         }
                     ]
                 }
