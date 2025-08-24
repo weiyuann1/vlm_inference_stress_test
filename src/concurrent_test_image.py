@@ -181,10 +181,15 @@ class VLLMUser(HttpUser):
                 timeout=300  # 5 minutes timeout
             )
             request_duration = time.time() - request_start_time
-            print(f"[INFO] Request #{current_count} completed in {request_duration:.2f}s with status: {response.status_code}")
+            
+            if response.status_code == 400:
+                print(f"[ERROR] Request #{current_count} failed with 400. Response: {response.text}")
+            else:
+                print(f"[INFO] Request #{current_count} completed in {request_duration:.2f}s with status: {response.status_code}")
                 
         except Exception as e:
-            print(f"[ERROR] Request #{current_count} failed: {e}")
+            request_duration = time.time() - request_start_time
+            print(f"[ERROR] Request #{current_count} failed after {request_duration:.2f}s: {e}")
         
         # Stop this user after completing the request
         if is_final_request:

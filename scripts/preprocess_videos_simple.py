@@ -8,6 +8,7 @@ import os
 import math
 import argparse
 import glob
+import gc
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
@@ -23,8 +24,8 @@ class VideoPreprocessor:
     """视频预处理器，复制LLaMA-Factory中的视频处理逻辑"""
     
     def __init__(self, 
-                 video_max_pixels: int = 230400,  # 对应训练脚本中的video_max_pixels
-                 video_min_pixels: int = 256,     # 16*16，最小像素数
+                 video_max_pixels: int = 602112,  # 对应推理脚本中的video_max_pixels
+                 video_min_pixels: int = 784,     # 16*16，最小像素数
                  video_fps: float = 2.0,          # 抽帧帧率
                  video_maxlen: int = 16):         # 对应训练脚本中的video_maxlen
         self.video_max_pixels = video_max_pixels
@@ -54,6 +55,7 @@ class VideoPreprocessor:
             # 保持相对于 video_base_dir 的目录结构
             rel_path = video_path_obj.relative_to(Path(video_base_dir))
             video_output_dir = Path(output_dir) / rel_path.parent / video_name
+            
             video_output_dir.mkdir(parents=True, exist_ok=True)
             
             # 使用qwen_vl_utils处理视频
@@ -86,6 +88,11 @@ class VideoPreprocessor:
                 frame_path = video_output_dir / frame_filename
                 img.save(frame_path, "JPEG", quality=95)
                 frame_paths.append(str(frame_path))
+                del img  # 立即释放内存
+            
+            # 清理大对象
+            del video_input, selected_frames, video_inputs
+            gc.collect()  # 强制垃圾回收
             
             return {
                 "video_path": video_path,
@@ -111,20 +118,20 @@ class VideoPreprocessor:
 
 def main():
     parser = argparse.ArgumentParser(description="简化的视频预处理脚本")
-    parser.add_argument("--video_dir", type=str, default="videos_directory",
+    parser.add_argument("--video_dir", type=str, default="group_stand",
                        help="视频目录路径 (默认: videos_directory)")
-    parser.add_argument("--output_dir", type=str, default="processed_videos",
+    parser.add_argument("--output_dir", type=str, default="processed_videos_512_512",
                        help="输出目录路径 (默认: processed_videos)")
     parser.add_argument("--video_max_pixels", type=int, default=262144,
                        help="视频最大像素数 (默认: 262144)")
-    parser.add_argument("--video_min_pixels", type=int, default=768,
+    parser.add_argument("--video_min_pixels", type=int, default=784,
                        help="视频最小像素数 (默认: 256)")
     parser.add_argument("--video_fps", type=float, default=2.0,
                        help="视频抽帧帧率 (默认: 2.0)")
     parser.add_argument("--video_maxlen", type=int, default=16,
                        help="视频最大帧数 (默认: 16)")
-    parser.add_argument("--num_workers", type=int, default=8,
-                       help="并行处理的线程数 (默认: 4)")
+    parser.add_argument("--num_workers", type=int, default=2,
+                       help="并行处理的线程数 (默认: 2)")
     
     args = parser.parse_args()
     
@@ -161,6 +168,28 @@ def main():
         print("没有找到视频文件")
         return
     
+    # 检查哪些视频已经处理过
+    unprocessed_videos = []
+    processed_count = 0
+    
+    for video_path in video_files:
+        video_path_obj = Path(video_path)
+        video_name = video_path_obj.stem
+        rel_path = video_path_obj.relative_to(Path(args.video_dir))
+        video_output_dir = Path(args.output_dir) / rel_path.parent / video_name
+        
+        if video_output_dir.exists() and any(video_output_dir.glob("frame_*.jpg")):
+            processed_count += 1
+        else:
+            unprocessed_videos.append(video_path)
+    
+    print(f"已处理: {processed_count} 个视频")
+    print(f"未处理: {len(unprocessed_videos)} 个视频")
+    
+    if not unprocessed_videos:
+        print("所有视频都已处理完成")
+        return
+    
     # 创建预处理器
     preprocessor = VideoPreprocessor(
         video_max_pixels=args.video_max_pixels,
@@ -169,20 +198,20 @@ def main():
         video_maxlen=args.video_maxlen
     )
     
-    # 并行处理视频
+    # 并行处理未处理的视频
     results = []
     successful_count = 0
     failed_count = 0
     
     with ThreadPoolExecutor(max_workers=args.num_workers) as executor:
-        # 提交所有任务
+        # 只提交未处理的视频任务
         future_to_video = {
             executor.submit(preprocessor.process_video, video_path, args.output_dir, args.video_dir): video_path
-            for video_path in video_files
+            for video_path in unprocessed_videos
         }
         
         # 处理结果
-        with tqdm(total=len(video_files), desc="处理视频") as pbar:
+        with tqdm(total=len(unprocessed_videos), desc="处理视频") as pbar:
             for future in as_completed(future_to_video):
                 video_path = future_to_video[future]
                 try:
@@ -199,6 +228,10 @@ def main():
                     else:
                         failed_count += 1
                         print(f"\n处理失败: {video_path} - {result['error']}")
+                    
+                    # 每处理完10个视频就清理一次内存
+                    if (successful_count + failed_count) % 10 == 0:
+                        gc.collect()
                         
                 except Exception as e:
                     failed_count += 1
@@ -208,13 +241,16 @@ def main():
                         "success": False,
                         "error": str(e)
                     })
+                    gc.collect()  # 异常时也清理内存
                 
                 pbar.update(1)
     
     # 输出统计信息
     print(f"\n处理完成:")
-    print(f"  - 成功处理: {successful_count} 个视频")
+    print(f"  - 新处理: {successful_count} 个视频")
     print(f"  - 处理失败: {failed_count} 个视频")
+    print(f"  - 之前已处理: {processed_count} 个视频")
+    print(f"  - 总计: {processed_count + successful_count} 个视频")
     print(f"  - 输出目录: {args.output_dir}")
     
     # 输出失败的视频列表
@@ -223,6 +259,8 @@ def main():
         for result in results:
             if not result["success"]:
                 print(f"  - {result['video_path']}: {result['error']}")
+    
+
 
 
 if __name__ == "__main__":

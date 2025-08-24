@@ -13,8 +13,8 @@ from threading import Timer
 
 
 # Default values
-VIDEO_BASE_PATH = "./processed_videos"
-_max_requests = 584
+VIDEO_BASE_PATH = "./processed_videos_512_512"
+_max_requests = 512
 prompt_text = "Please describe the content of the video."
 max_tokens = 200
 
